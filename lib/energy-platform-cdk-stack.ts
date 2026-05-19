@@ -200,7 +200,7 @@ Use the available tools to fetch real data before responding.`,
 
     new s3deploy.BucketDeployment(this, 'DeploySite', {
       sources: [
-        s3deploy.Source.asset(path.join(__dirname, '..', '..', 'demo'), {
+        s3deploy.Source.asset(path.join(__dirname, '..', 'demo'), {
           exclude: ['*.pptx', '*.docx', '*.py', '*.md', '.DS_Store', 'generated-diagrams/**'],
         }),
         s3deploy.Source.data('config.js', `window.CHAT_API_URL="${api.url}chat";`),
