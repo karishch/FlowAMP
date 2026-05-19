@@ -4,6 +4,10 @@ FlowAMP is an AI agent governance and compliance starter kit for energy utilitie
 
 The project is implemented as an AWS CDK TypeScript stack with Lambda, DynamoDB, API Gateway, Amazon Bedrock, Bedrock AgentCore, S3, and CloudFront.
 
+## Live Demo
+
+Open the hosted FlowAMP demo: [https://d1ox9mx07nnxxx.cloudfront.net](https://d1ox9mx07nnxxx.cloudfront.net)
+
 ## Why This Exists
 
 AI agents are moving from pilots into operational environments where they may access ADMS, SCADA, Maximo, AMI, customer systems, market data, and compliance workflows. At that point, teams need more than isolated agent demos. They need enforceable boundaries, cost visibility, audit trails, access control, and continuous compliance evidence.
