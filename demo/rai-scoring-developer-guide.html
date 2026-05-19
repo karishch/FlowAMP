@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAI Scoring — Production Developer Guide</title>
+<style>
+  :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --green: #4ade80; --yellow: #fbbf24; --red: #f87171; --code-bg: #0d1117; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; padding: 2rem; max-width: 960px; margin: 0 auto; }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; color: #fff; }
+  h2 { font-size: 1.5rem; margin: 2.5rem 0 1rem; color: var(--accent); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+  h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: #fff; }
+  p, li { color: var(--text); margin-bottom: 0.5rem; }
+  .subtitle { color: var(--muted); font-size: 1rem; margin-bottom: 2rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+  .signal-box { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin: 0.75rem 0; font-family: 'SF Mono', Consolas, monospace; font-size: 0.85rem; color: var(--green); white-space: pre-wrap; overflow-x: auto; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; margin: 0.75rem 0; overflow-x: auto; }
+  code { font-family: 'SF Mono', Consolas, monospace; font-size: 0.85rem; color: var(--green); }
+  .inline-code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--accent); }
+  ul { padding-left: 1.5rem; margin: 0.5rem 0; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 0.75rem; text-align: left; border: 1px solid var(--border); }
+  th { background: var(--card); color: var(--accent); }
+  td { background: var(--bg); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+  .badge-demo { background: rgba(251,191,36,0.15); color: var(--yellow); }
+  .badge-prod { background: rgba(74,222,128,0.15); color: var(--green); }
+  .pillar-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .pillar-icon { font-size: 1.5rem; }
+  .weight { color: var(--muted); font-size: 0.85rem; }
+  .scoring-formula { background: rgba(56,189,248,0.08); border: 1px solid rgba(56,189,248,0.2); border-radius: 6px; padding: 1rem; margin: 0.75rem 0; }
+  .scoring-formula code { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>🛡️ Responsible AI Scoring — Production Developer Guide</h1>
+<p class="subtitle">Energy Agent Management Platform · How to build real RAI scoring from AWS signals</p>
+
+<div class="card">
+  <strong>Context:</strong> The current <span class="inline-code">rai-scorer</span> Lambda runs daily via EventBridge and computes four sub-scores (fairness, transparency, accountability, ethics) per agent. This guide explains how to move from demo placeholders to real production signals using Bedrock Guardrails, CloudWatch, CloudTrail, and AWS Config.
+</div>
+
+<h2>Architecture Overview</h2>
+
+<div class="card">
+<pre><code>EventBridge (daily cron)
+        │
+        ▼
+┌──────────────────┐     ┌──────────────┐     ┌──────────────┐
+│  RAI Scorer      │────▶│  CloudWatch  │     │  CloudTrail  │
+│  Lambda (Py3.12) │────▶│  Metrics     │     │  Events      │
+│                  │────▶│              │     │              │
+└────────┬─────────┘     └──────────────┘     └──────────────┘
+         │                      │                     │
+         │    ┌─────────────────┴─────────────────────┘
+         │    │
+         ▼    ▼
+┌──────────────────┐     ┌──────────────┐     ┌──────────────┐
+│  DynamoDB        │     │  Bedrock     │     │  Lambda      │
+│  Agent Table     │     │  GetAgent    │     │  GetFunction │
+│  (read/write)    │     │  GetGuardrail│     │  Config      │
+└──────────────────┘     └──────────────┘     └──────────────┘</code></pre>
+</div>
+
+<p>The scorer scans the <span class="inline-code">AgentTable</span>, skips non-agent records (prefixed <span class="inline-code">compliance:</span>, <span class="inline-code">aop:</span>, <span class="inline-code">access:</span>), and computes four equally-weighted sub-scores per agent. The overall score is the weighted average, optionally modified by a system-level NIST RMF compliance factor.</p>
+
+<h2>1. Fairness <span class="weight">(25% weight)</span></h2>
+
+<div class="card">
+  <div class="pillar-header">
+    <span class="pillar-icon">⚖️</span>
+    <div>
+      <strong>Goal:</strong> Detect and prevent biased or unfair outputs from agents.
+    </div>
+  </div>
+
+  <h3>What the demo does <span class="badge badge-demo">DEMO</span></h3>
+  <p>Queries an assumed <span class="inline-code">GuardrailInterventions</span> metric that may not exist with the expected dimensions.</p>
+
+  <h3>What production needs <span class="badge badge-prod">PRODUCTION</span></h3>
+  <ul>
+    <li><strong>Bedrock Guardrails</strong> — Create a guardrail with content filters and contextual grounding checks, then attach it to your agent. Real CloudWatch metrics are emitted under <span class="inline-code">AWS/Bedrock</span> with dimension <span class="inline-code">GuardrailId</span>.</li>
+    <li><strong>Invocation log sampling</strong> — Enable Bedrock model invocation logging to S3. Run a batch job that samples input/output pairs and checks for demographic disparity in responses.</li>
+    <li><strong>Human feedback loop</strong> — Store thumbs-up/down from operators. If a specific agent gets disproportionate negative feedback on certain input categories, that's a fairness signal.</li>
+  </ul>
+
+  <h3>Real Signal Sources</h3>
+  <div class="signal-box">CloudWatch:  AWS/Bedrock → GuardrailId dimension → Invocations, GuardrailsIntervened
+S3 logs:     Bedrock invocation logs → parse input/output → run bias classifier
+DynamoDB:    User feedback records → aggregate by agent + input category</div>
+
+  <h3>Scoring Logic</h3>
+  <pre><code>def score_fairness(agent):
+    invocations = get_metric('AWS/Bedrock', 'Invocations',
+        [{'Name': 'GuardrailId', 'Value': agent['guardrailId']}])
+    interventions = get_metric('AWS/Bedrock', 'GuardrailsIntervened',
+        [{'Name': 'GuardrailId', 'Value': agent['guardrailId']}])
+    intervention_rate = interventions / max(invocations, 1)
+
+    # Also factor in user feedback if available
+    feedback = get_feedback_stats(agent['agentId'])
+    negative_rate = feedback['negative'] / max(feedback['total'], 1)
+
+    # Base 95, penalize for high intervention rate and negative feedback
+    score = 95 - (intervention_rate * 100 * 0.5) - (negative_rate * 100 * 0.3)
+    return max(50, min(100, round(score)))</code></pre>
+</div>
+
+<h2>2. Transparency <span class="weight">(25% weight)</span></h2>
+
+<div class="card">
+  <div class="pillar-header">
+    <span class="pillar-icon">🔍</span>
+    <div>
+      <strong>Goal:</strong> Ensure agent decisions are auditable and traceable.
+    </div>
+  </div>
+
+  <h3>What the demo does <span class="badge badge-demo">DEMO</span></h3>
+  <p>Counts CloudTrail events mentioning the agent's resource name. Blunt — doesn't distinguish event types or check if logging is actually enabled.</p>
+
+  <h3>What production needs <span class="badge badge-prod">PRODUCTION</span></h3>
+  <ul>
+    <li><strong>CloudTrail coverage</strong> — Verify <span class="inline-code">bedrock:InvokeAgent</span>, <span class="inline-code">bedrock:InvokeModel</span>, and <span class="inline-code">lambda:Invoke</span> events exist for each agent's resources in the last 24h.</li>
+    <li><strong>Bedrock invocation logging</strong> — Call <span class="inline-code">GetModelInvocationLoggingConfiguration</span> to check if full input/output logging to S3 or CloudWatch Logs is enabled. This is the real transparency layer.</li>
+    <li><strong>Agent trace visibility</strong> — Bedrock Agents emit trace events showing the reasoning chain. Check if <span class="inline-code">enableTrace</span> is set on agent invocations so operators can see <em>why</em> the agent made a decision.</li>
+    <li><strong>CloudWatch Log groups</strong> — Verify log groups exist for the agent's Lambda functions (decisions are recorded).</li>
+  </ul>
+
+  <h3>Real Signal Sources</h3>
+  <div class="signal-box">CloudTrail:  LookupEvents for bedrock:InvokeAgent, bedrock:InvokeModel
+Bedrock:     GetModelInvocationLoggingConfiguration → is logging enabled?
+Agent trace: Check if agent alias has trace enabled in invocation config
+CW Logs:     DescribeLogGroups → do log groups exist for agent Lambdas?</div>
+
+  <h3>Scoring Logic</h3>
+  <pre><code>def score_transparency(agent):
+    score = 60  # baseline
+
+    # +15 if CloudTrail has bedrock/lambda events for this agent
+    trail_events = count_cloudtrail_events(agent['agentId'])
+    if trail_events > 0:
+        score += 15
+
+    # +15 if Bedrock invocation logging is enabled
+    try:
+        logging_config = bedrock.get_model_invocation_logging_configuration()
+        config = logging_config.get('loggingConfig', {})
+        if config.get('s3Config', {}).get('bucketName') or \
+           config.get('cloudWatchConfig', {}).get('logGroupName'):
+            score += 15
+    except Exception:
+        pass  # logging not configured
+
+    # +10 if CloudWatch log groups exist for agent Lambda
+    try:
+        logs_client = boto3.client('logs')
+        result = logs_client.describe_log_groups(
+            logGroupNamePrefix=f'/aws/lambda/{agent["functionName"]}')
+        if result.get('logGroups'):
+            score += 10
+    except Exception:
+        pass
+
+    return min(100, score)</code></pre>
+</div>
+
+<h2>3. Accountability <span class="weight">(25% weight)</span></h2>
+
+<div class="card">
+  <div class="pillar-header">
+    <span class="pillar-icon">📋</span>
+    <div>
+      <strong>Goal:</strong> Ensure failures are handled properly and someone is responsible.
+    </div>
+  </div>
+
+  <h3>What the demo does <span class="badge badge-demo">DEMO</span></h3>
+  <p>Reads error rate from DynamoDB fields and checks a single Lambda error metric. Doesn't verify DLQs, alarms, or ownership.</p>
+
+  <h3>What production needs <span class="badge badge-prod">PRODUCTION</span></h3>
+  <ul>
+    <li><strong>Lambda error rate</strong> — Query <span class="inline-code">AWS/Lambda</span> → <span class="inline-code">Errors</span> and <span class="inline-code">Invocations</span> by <span class="inline-code">FunctionName</span>. This is the primary signal.</li>
+    <li><strong>Dead Letter Queue</strong> — Call <span class="inline-code">GetFunctionConfiguration</span> and check <span class="inline-code">DeadLetterConfig</span> exists. No DLQ = failures silently disappear = low accountability.</li>
+    <li><strong>CloudWatch Alarms</strong> — Call <span class="inline-code">DescribeAlarms</span> filtered by agent resources. No alarms = nobody is watching.</li>
+    <li><strong>Ownership metadata</strong> — Check if the agent record in DynamoDB has <span class="inline-code">owner</span>, <span class="inline-code">team</span>, <span class="inline-code">escalationContact</span> fields populated.</li>
+    <li><strong>Staleness check</strong> — An agent untouched for 6+ months with no owner is an accountability risk. Check <span class="inline-code">lastUpdated</span> field.</li>
+  </ul>
+
+  <h3>Real Signal Sources</h3>
+  <div class="signal-box">CloudWatch:  AWS/Lambda → Errors, Invocations by FunctionName
+Lambda:      GetFunctionConfiguration → check DeadLetterConfig.TargetArn exists
+CloudWatch:  DescribeAlarms → filter by agent-related resource names
+DynamoDB:    agent record → check owner, team, lastUpdated fields</div>
+
+  <h3>Scoring Logic</h3>
+  <pre><code>def score_accountability(agent):
+    fn_name = agent.get('functionName', 'AgentHandlerFn')
+    invocations = get_metric('AWS/Lambda', 'Invocations',
+        [{'Name': 'FunctionName', 'Value': fn_name}])
+    errors = get_metric('AWS/Lambda', 'Errors',
+        [{'Name': 'FunctionName', 'Value': fn_name}])
+    error_rate = errors / max(invocations, 1)
+
+    score = 95 - (error_rate * 200)  # 5% error rate → score 85
+
+    # Check DLQ exists
+    try:
+        fn_config = lambda_client.get_function_configuration(
+            FunctionName=fn_name)
+        if not fn_config.get('DeadLetterConfig', {}).get('TargetArn'):
+            score -= 10  # no DLQ configured
+    except Exception:
+        score -= 10
+
+    # Check alarms exist for this agent
+    alarms = cw.describe_alarms(
+        AlarmNamePrefix=agent['agentId'])
+    if not alarms.get('MetricAlarms'):
+        score -= 5  # no monitoring alarms
+
+    # Check ownership metadata
+    if not agent.get('owner'):
+        score -= 10  # no owner assigned
+
+    # Check staleness (last updated > 180 days ago)
+    last_updated = agent.get('lastUpdated', '')
+    if last_updated:
+        days_old = (datetime.utcnow() - datetime.fromisoformat(
+            last_updated.rstrip('Z'))).days
+        if days_old > 180:
+            score -= 5  # stale agent
+
+    return max(50, min(100, round(score)))</code></pre>
+</div>
+
+<h2>4. Ethics <span class="weight">(25% weight)</span></h2>
+
+<div class="card">
+  <div class="pillar-header">
+    <span class="pillar-icon">🧭</span>
+    <div>
+      <strong>Goal:</strong> Ensure agents avoid harmful content and protect PII.
+    </div>
+  </div>
+
+  <h3>What the demo does <span class="badge badge-demo">DEMO</span></h3>
+  <p>Queries assumed <span class="inline-code">GuardrailBlocked</span> and <span class="inline-code">GuardrailPiiRedacted</span> metrics that may not exist.</p>
+
+  <h3>What production needs <span class="badge badge-prod">PRODUCTION</span></h3>
+  <ul>
+    <li><strong>Guardrail attachment check</strong> — Call <span class="inline-code">bedrock:GetAgent</span> and verify <span class="inline-code">guardrailConfiguration</span> exists. An agent with no guardrail = ethics score drops hard.</li>
+    <li><strong>Guardrail policy verification</strong> — Call <span class="inline-code">bedrock:GetGuardrail</span> and check that content filters, PII filters, denied topics, and contextual grounding policies are configured.</li>
+    <li><strong>Guardrail runtime metrics</strong> — After attaching a guardrail, CloudWatch emits real metrics under <span class="inline-code">AWS/Bedrock</span> with <span class="inline-code">GuardrailId</span> and <span class="inline-code">GuardrailVersion</span> dimensions.</li>
+    <li><strong>Invocation log sampling</strong> — Sample outputs from S3 invocation logs and scan for PII leakage that the guardrail may have missed.</li>
+  </ul>
+
+  <h3>Real Signal Sources</h3>
+  <div class="signal-box">Bedrock:     GetAgent → check guardrailConfiguration exists
+Bedrock:     GetGuardrail → verify contentPolicy, sensitiveInformationPolicy, topicPolicy
+CloudWatch:  AWS/Bedrock → GuardrailId dimension → runtime block/intervene metrics
+S3 logs:     Invocation logs → sample outputs for PII leakage</div>
+
+  <h3>Scoring Logic</h3>
+  <pre><code>def score_ethics(agent):
+    score = 60  # baseline without guardrail
+
+    # Check if guardrail is attached to the agent
+    try:
+        agent_config = bedrock.get_agent(agentId=agent['agentId'])
+        guardrail = agent_config.get('agent', {}).get(
+            'guardrailConfiguration')
+    except Exception:
+        guardrail = None
+
+    if guardrail:
+        score += 20  # guardrail exists and is attached
+
+        # Check what policies the guardrail has
+        try:
+            gr = bedrock.get_guardrail(
+                guardrailIdentifier=guardrail['guardrailIdentifier'])
+            if gr.get('contentPolicy'):
+                score += 5   # content filters active
+            if gr.get('sensitiveInformationPolicy'):
+                score += 10  # PII protection active
+            if gr.get('topicPolicy'):
+                score += 5   # denied topics configured
+        except Exception:
+            pass
+
+    return min(100, score)</code></pre>
+</div>
+
+<h2>5. System-Level: NIST RMF Modifier</h2>
+
+<div class="card">
+  <div class="pillar-header">
+    <span class="pillar-icon">🏛️</span>
+    <div>
+      <strong>Goal:</strong> Weak system-level risk posture should drag down all agent scores.
+    </div>
+  </div>
+
+  <p>The current implementation reads a <span class="inline-code">compliance:nist-sp800-37</span> record from DynamoDB. In production, tie this to real AWS security posture:</p>
+
+  <h3>Option A: AWS Security Hub</h3>
+  <pre><code>def get_rmf_modifier():
+    sh = boto3.client('securityhub')
+    # Get the overall security score from Security Hub
+    response = sh.get_security_control_definitions()
+    # Parse compliance percentage from findings
+    findings = sh.get_findings(Filters={
+        'ComplianceStatus': [{'Value': 'FAILED', 'Comparison': 'EQUALS'}],
+        'RecordState': [{'Value': 'ACTIVE', 'Comparison': 'EQUALS'}]
+    })
+    failed_count = len(findings.get('Findings', []))
+    # More failures = lower modifier (0.90 to 1.0 range)
+    return max(0.90, 1.0 - (failed_count * 0.002))</code></pre>
+
+  <h3>Option B: AWS Config Rules</h3>
+  <pre><code>def get_rmf_modifier():
+    config = boto3.client('config')
+    rules = config.describe_compliance_by_config_rule(
+        ComplianceTypes=['COMPLIANT', 'NON_COMPLIANT']
+    )['ComplianceByConfigRules']
+    compliant = sum(1 for r in rules
+        if r['Compliance']['ComplianceType'] == 'COMPLIANT')
+    total = len(rules) or 1
+    ratio = compliant / total
+    # 100% compliant → 1.0, 80% → 0.96, 60% → 0.92
+    return max(0.90, 0.80 + (ratio * 0.20))</code></pre>
+
+  <p>The modifier is applied as: <span class="inline-code">overall_score = round(weighted_average * rmf_modifier)</span></p>
+</div>
+
+<h2>6. CDK Changes for Production</h2>
+
+<div class="card">
+  <p>To make the scorer work with real signals, add these to <span class="inline-code">energy-platform-cdk-stack.ts</span>:</p>
+
+  <h3>Additional IAM Permissions for RAI Scorer Lambda</h3>
+  <pre><code>raiScorerFn.addToRolePolicy(new iam.PolicyStatement({
+  actions: [
+    // Existing
+    'cloudwatch:GetMetricStatistics',
+    'cloudwatch:ListMetrics',
+    'cloudtrail:LookupEvents',
+    // New for production
+    'bedrock:GetAgent',
+    'bedrock:GetGuardrail',
+    'bedrock:GetModelInvocationLoggingConfiguration',
+    'lambda:GetFunctionConfiguration',
+    'cloudwatch:DescribeAlarms',
+    'logs:DescribeLogGroups',
+    // If using Security Hub
+    'securityhub:GetFindings',
+    // If using AWS Config
+    'config:DescribeComplianceByConfigRule',
+  ],
+  resources: ['*'],
+}));</code></pre>
+
+  <h3>Add a Bedrock Guardrail (required for ethics + fairness scoring)</h3>
+  <pre><code>const guardrail = new bedrock.Guardrail(this, 'EnergyGuardrail', {
+  name: 'energy-agent-guardrail',
+  blockedInputMessaging: 'Request blocked by content policy.',
+  blockedOutputsMessaging: 'Response blocked by content policy.',
+  contentFilters: [
+    {
+      type: bedrock.ContentFilterType.HATE,
+      inputStrength: bedrock.FilterStrength.HIGH,
+      outputStrength: bedrock.FilterStrength.HIGH,
+    },
+    {
+      type: bedrock.ContentFilterType.VIOLENCE,
+      inputStrength: bedrock.FilterStrength.HIGH,
+      outputStrength: bedrock.FilterStrength.HIGH,
+    },
+  ],
+  piiFilters: [
+    {
+      type: bedrock.PiiEntityType.EMAIL,
+      action: bedrock.GuardrailAction.ANONYMIZE,
+    },
+    {
+      type: bedrock.PiiEntityType.PHONE,
+      action: bedrock.GuardrailAction.ANONYMIZE,
+    },
+  ],
+});
+
+// Attach guardrail to the agent
+agent.addGuardrail(guardrail);</code></pre>
+
+  <h3>Enable Bedrock Invocation Logging (required for transparency scoring)</h3>
+  <pre><code>// Create S3 bucket for invocation logs
+const invocationLogBucket = new s3.Bucket(this, 'InvocationLogBucket', {
+  removalPolicy: cdk.RemovalPolicy.RETAIN,
+  encryption: s3.BucketEncryption.S3_MANAGED,
+  lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+});
+
+// Enable via custom resource (no L2 construct yet)
+new cr.AwsCustomResource(this, 'EnableInvocationLogging', {
+  onCreate: {
+    service: 'Bedrock',
+    action: 'putModelInvocationLoggingConfiguration',
+    parameters: {
+      loggingConfig: {
+        s3Config: {
+          bucketName: invocationLogBucket.bucketName,
+          keyPrefix: 'invocation-logs/',
+        },
+        embeddingDataDeliveryEnabled: false,
+        imageDataDeliveryEnabled: false,
+        textDataDeliveryEnabled: true,
+      },
+    },
+    physicalResourceId: cr.PhysicalResourceId.of('invocation-logging'),
+  },
+  policy: cr.AwsCustomResourcePolicy.fromStatements([
+    new iam.PolicyStatement({
+      actions: ['bedrock:PutModelInvocationLoggingConfiguration'],
+      resources: ['*'],
+    }),
+  ]),
+});</code></pre>
+</div>
+
+<h2>7. Summary: Demo → Production Gap</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Pillar</th>
+      <th>Demo (Current)</th>
+      <th>Production (Real Signals)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Fairness</strong></td>
+      <td>Assumed CW metric that may not exist</td>
+      <td>Guardrail intervention rate + invocation log sampling + user feedback</td>
+    </tr>
+    <tr>
+      <td><strong>Transparency</strong></td>
+      <td>CloudTrail event count (blunt)</td>
+      <td>Invocation logging enabled? + Trace enabled? + Log groups exist?</td>
+    </tr>
+    <tr>
+      <td><strong>Accountability</strong></td>
+      <td>Error rate from DDB fields</td>
+      <td>Lambda error rate + DLQ exists? + Alarms exist? + Owner assigned?</td>
+    </tr>
+    <tr>
+      <td><strong>Ethics</strong></td>
+      <td>Assumed guardrail block metrics</td>
+      <td>Guardrail attached? + Content/PII/topic policies configured?</td>
+    </tr>
+    <tr>
+      <td><strong>System-Level</strong></td>
+      <td>DDB compliance record</td>
+      <td>Security Hub score or AWS Config rule compliance</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="card" style="border-color: var(--accent); margin-top: 2rem;">
+  <strong>💡 Key Insight:</strong> In production, the scorer should check <em>configuration</em> (is the guardrail attached? is logging enabled? is there a DLQ?) as much as <em>runtime metrics</em>. A well-configured agent with no incidents scores higher than a poorly-configured agent that hasn't been caught yet.
+</div>
+
+<div style="margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem;">
+  <p>Energy Agent Management Platform · RAI Scoring Developer Guide · Generated April 2026</p>
+  <p>Source: <span class="inline-code">energy-platform-cdk/lambda/rai-scorer/index.py</span></p>
+</div>
+
+</body>
+</html>
