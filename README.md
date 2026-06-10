@@ -6,7 +6,7 @@ The project is implemented as an AWS CDK TypeScript stack with Lambda, DynamoDB,
 
 ## Live Demo
 
-Open the hosted FlowAMP demo: [https://d1ox9mx07nnxxx.cloudfront.net](https://d1ox9mx07nnxxx.cloudfront.net)
+Open the hosted FlowAMP demo: [https://d2soj4n1zziqbk.cloudfront.net/](https://d2soj4n1zziqbk.cloudfront.net/)
 
 ## Why This Exists
 
